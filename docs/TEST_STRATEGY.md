@@ -2,8 +2,8 @@
 
 **Application Under Test:** ParaBank Demo (https://parabank.parasoft.com/parabank/index.htm)
 **Scope:** Account Operations & Money Movement
-**Tester:** [Your Name]
-**Date:** [Date]
+**Tester:** Ahmed Ragab Hussien
+**Date:** 22/7/2026
 
 ## 1. Objective
 

@@ -1,11 +1,51 @@
 # Top 5 Defects
 
+Ranked using Risk-Based Testing principles (Business Impact, Financial
+Impact, Data Integrity, Security Risk, Customer Impact, Probability of
+Occurrence, Recoverability, Release Risk, Compliance/Banking Risk) —
+**not** by Severity field alone. Order reflects overall business risk,
+highest first.
+
 ---
 
-## BUG-001: BOLA/IDOR — Unauthorized Transfer of Funds from Arbitrary Account
+## BUG-001: Lack of Input Validation — Negative Amounts Accepted on Transfer and Bill Pay ("Money Creation")
 
 **Severity:** Critical
 **Priority:** Highest
+**Risk Score:** 10/10
+
+### Description
+Both the Transfer Funds and Bill Pay flows accept negative values for the amount field. Rather than being rejected, a negative amount inverts the expected debit/credit direction: the source account's balance *increases* instead of decreasing, effectively creating funds from nothing.
+
+### Endpoint
+`POST /transfer` (also reproducible via the Bill Pay UI flow)
+Query Parameters: `fromAccountId`, `toAccountId`, `amount`
+
+### Preconditions
+- Attacker is authenticated and has access to at least one account (no other account or victim required).
+
+### Steps to Reproduce
+1. Send `POST /transfer?fromAccountId=70731&toAccountId=59298&amount=-1000`.
+2. Fetch transaction logs via `GET /accounts/59298/transactions`.
+3. Separately, repeat the equivalent negative-amount submission through the Bill Pay form/API and check both accounts' balances.
+
+### Expected Result
+`400 Bad Request` — validation error requiring `amount` to be strictly positive (`> 0`).
+
+### Actual Result
+`200 OK` in both flows. The transfer/payment is processed with the negative value: a `-1000.00` entry is recorded in transaction history, and the source account's balance **increases** rather than being debited or rejected.
+
+### Supporting Evidence
+Request/response for the transfer case as above; equivalent evidence captured for Bill Pay via UI + DevTools. Balances confirmed before/after on both sides of the transaction. [Attach screenshots and transaction log excerpt.]
+
+
+---
+
+## BUG-002: BOLA/IDOR — Unauthorized Transfer of Funds from Arbitrary Account
+
+**Severity:** Critical
+**Priority:** Highest
+**Risk Score:** 10/10
 
 ### Description
 The Transfer Funds endpoint does not verify that the authenticated user owns or has permission over the `fromAccountId` supplied in the request. An attacker can specify any account ID — including one belonging to a different customer — as the funding source and successfully transfer money out of it.
@@ -32,15 +72,13 @@ Query Parameters: `fromAccountId`, `toAccountId`, `amount`
 ### Supporting Evidence
 Request/response pair captured via DevTools/Postman as above. [Attach screenshot of captured request, response body, and before/after balances for account #12345 in the submission repo.]
 
-### Business Impact
-Allows any authenticated user to drain funds from any other customer's account by guessing or enumerating account IDs — the most severe possible failure mode for a banking application's core transaction feature.
-
 ---
 
-## BUG-002: IDOR on Account Creation — Funding New Account with Another Customer's Account
+## BUG-003: IDOR on Account Creation — Funding New Account with Another Customer's Account
 
 **Severity:** High
 **Priority:** High
+**Risk Score:** 8.5/10
 
 ### Description
 The account-creation endpoint accepts a `fromAccountId` used to fund the new account's opening balance without validating that this account belongs to the authenticated `customerId`.
@@ -51,7 +89,7 @@ Query Parameters: `customerId`, `newAccountType`, `fromAccountId`
 
 ### Preconditions
 - Attacker is authenticated with a valid `customerId`.
-- Attacker knows an account ID belonging to a different customer.
+- Attacker knows an account ID belonging to another customer.
 
 ### Steps to Reproduce
 1. Log in with `customerId=42293`.
@@ -67,76 +105,36 @@ The system verifies `fromAccountId` belongs to the authenticated `customerId` be
 ### Supporting Evidence
 Request/response pair as above; new account ID `74616` created and linked to account `#12345`. [Attach screenshot of request and resulting account listing.]
 
-### Business Impact
-Same class of vulnerability as BUG-001 (broken access control / IDOR) applied to account creation — allows unauthorized use of another customer's funds to open new accounts.
-
 ---
 
-## BUG-003: Lack of Input Validation — Negative Amounts Accepted on Transfer and Bill Pay
+## BUG-004: Missing Idempotency Protection — Duplicate Resubmission Processes Multiple Real Transactions
 
 **Severity:** High
 **Priority:** High
+**Risk Score:** 8/10
 
 ### Description
-Both the Transfer Funds and Bill Pay flows accept negative values for the amount field. Rather than being rejected, a negative amount inverts the expected debit/credit direction: the source account's balance *increases* instead of decreasing, effectively creating funds from nothing.
+Neither the Transfer Funds nor the Bill Pay endpoint has any protection against duplicate submission. Each click of the submit button (e.g., due to a slow response, accidental double-click, or resubmission) is processed as a fully independent transaction, with no duplicate-request detection or confirmation step. This requires no malicious intent or request tampering — it reproduces from completely normal user behavior.
 
 ### Endpoint
-`POST /transfer` (also reproducible via the Bill Pay UI flow)
-Query Parameters: `fromAccountId`, `toAccountId`, `amount`
+`POST /transfer` and Bill Pay submission (UI)
 
 ### Preconditions
-- Attacker is authenticated and has access to at least one account.
+- User is authenticated with a funded source account.
 
 ### Steps to Reproduce
-1. Send `POST /transfer?fromAccountId=70731&toAccountId=59298&amount=-1000`.
-2. Fetch transaction logs via `GET /accounts/59298/transactions`.
-3. Separately, repeat the equivalent negative-amount submission through the Bill Pay form/API and check both accounts' balances.
+1. Navigate to Transfer Funds (or Bill Pay), enter a valid amount, and click Submit multiple times in quick succession (e.g., 3 clicks).
+2. Check the source account's transaction history and balance.
+3. Repeat the same test on the other flow (Bill Pay, if starting from Transfer Funds, or vice versa).
 
 ### Expected Result
-`400 Bad Request` — validation error requiring `amount` to be strictly positive (`> 0`).
+Only one transaction should be processed per user intent. The system should detect and reject or ignore duplicate/rapid resubmissions (e.g., via a disabled submit button after first click, a confirmation step, or server-side idempotency keys).
 
 ### Actual Result
-`200 OK` in both flows. The transfer/payment is processed with the negative value: a `-1000.00` entry is recorded in transaction history, and the source account's balance **increases** rather than being debited or rejected.
+Each click was processed as a separate, real transaction — 3 clicks produced 3 separate transfers of the same amount, each debited independently. Confirmed on both Transfer Funds and Bill Pay.
 
 ### Supporting Evidence
-Request/response for the transfer case as above; equivalent evidence captured for Bill Pay via UI + DevTools. Balances confirmed before/after on both sides of the transaction. [Attach screenshots and transaction log excerpt.]
-
-### Business Impact
-Allows unauthorized fund creation ("money printing") by any authenticated user via a trivial parameter change, affecting both of the application's core money-movement flows.
-
----
-
-## BUG-004: Business Logic Flaw — No Balance Check Permits Overdraft on Transfer
-
-**Severity:** High
-**Priority:** High
-
-### Description
-The Transfer Funds endpoint does not verify that the source account has sufficient available balance to cover the requested transfer amount, allowing the account to be driven negative.
-
-### Endpoint
-`POST /transfer`
-Query Parameters: `fromAccountId`, `toAccountId`, `amount`
-
-### Preconditions
-- Source account has a known, limited balance (e.g., $100.00).
-
-### Steps to Reproduce
-1. Check balance for account `70731` (e.g., balance is `$100.00`).
-2. Send `POST /transfer?fromAccountId=70731&toAccountId=59298&amount=1000`.
-3. Check the response and resulting balance.
-
-### Expected Result
-`400 Bad Request` or `422 Unprocessable Entity`, with a message such as *"Insufficient funds"*.
-
-### Actual Result
-`200 OK` — the transfer completes despite the amount exceeding the account's available balance, leaving the source account negative.
-
-### Supporting Evidence
-Request/response pair as above, with before/after balance for account `#70731`. [Attach screenshot.]
-
-### Business Impact
-Permits unauthorized overdrafts with no limit enforcement, directly compromising account balance integrity — a core banking guarantee.
+Transaction history showing multiple identical "Funds Transfer Sent" entries for the same amount and date, corresponding to a single user action of repeated clicks. [Attach screenshot of transaction history and before/after balance.]
 
 ---
 
@@ -144,6 +142,7 @@ Permits unauthorized overdrafts with no limit enforcement, directly compromising
 
 **Severity:** Critical
 **Priority:** High
+**Risk Score:** 7.5/10
 
 ### Description
 Opening a new account requires a minimum initial deposit of $100.00. The system does not verify that the selected source account has sufficient available balance to cover this deposit before processing the request, allowing the source account to be driven negative.
@@ -172,8 +171,6 @@ The system validates the source account's available balance before processing; i
 ### Supporting Evidence
 Before: Account `14581` balance $0.00. After: Account `14581` balance -$100.00; new account `17562` balance $100.00. [Attach screenshot of Accounts Overview before/after, and the captured `createAccount` request/response.]
 
-### Business Impact
-Allows unauthorized overdraft creation via a routine, everyday user action (not just via deliberate parameter tampering), directly corrupting account balance integrity.
 
 ---
 
@@ -192,4 +189,30 @@ Allows unauthorized overdraft creation via a routine, everyday user action (not 
 
 ### A2. Sensitive Data Exposure & Insecure Credential Transmission (Login)
 
-Credentials transmitted via `GET /login/{username}/{password}` (plaintext credentials in the URL, plus unmasked PII such as SSN and address in the response). Not included in the Top 5 as it falls outside the assessment's declared scope of Account Operations and Money Movement, but flagged here as a notable adjacent finding worth a follow-up security review.
+Credentials transmitted via `GET /login/{username}/{password}` (plaintext credentials in the URL, plus unmasked PII such as SSN and address in the response). Not included in the Top 5 as it falls outside the assessment's declared scope of Account Operations and Money Movement, but flagged here as a notable adjacent finding worth a follow-up security review. Note: in a pure risk-based (not scope-limited) ranking, this finding would score approximately 9/10, ahead of BUG-003 and BUG-004 above, due to its 100% occurrence rate (every login) and significant compliance exposure (GLBA-type breach notification risk).
+
+### A3. Business Logic Flaw — No Balance Check Permits Overdraft on Transfer
+
+**Severity:** High
+**Priority:** High
+
+**Description:** The Transfer Funds endpoint does not verify that the source account has sufficient available balance to cover the requested transfer amount, allowing the account to be driven negative. Reproduced by transferring $1000 from account `#70731` (balance $100.00) to account `#59298` — the transfer completed (`200 OK`) despite exceeding the available balance, leaving the source account negative. Not included in the Top 5 as it overlaps thematically with BUG-005 (missing balance validation), but documented here as it remains a valid, distinct finding on the transfer endpoint specifically.
+
+### A4. IDOR on Loan Request — Down Payment Debited from Another Customer's Account
+ 
+**Severity:** Critical
+**Priority:** Highest
+ 
+**Description:** The loan request service (`requestLoan`) correctly validates that the specified down-payment account has *sufficient funds* (confirmed via a positive control test — a loan request with an underfunded down-payment account was correctly rejected) but performs no ownership/authorization check at all on the `downPaymentAccountId`. A user can fund their own loan's down payment using an account belonging to a different customer.
+ 
+**Endpoint:** `requestLoan(int customerId, double amount, double downPayment, int downPaymentAccountId)` (SOAP/Postman)
+ 
+**Steps to Reproduce:**
+1. Authenticate as the attacker.
+2. Submit a loan request via the SOAP/API client, specifying `downPaymentAccountId` belonging to a different customer.
+3. Observe the loan approval response.
+4. Check the victim account's balance/transaction history to confirm the debit.
+**Expected Result:** The system should verify `downPaymentAccountId` belongs to the authenticated customer before processing; if not, reject with an authorization error.
+ 
+**Actual Result:** Loan approved; down payment successfully debited from an account the requester does not own.
+ 
